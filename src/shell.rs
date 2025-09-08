@@ -1,6 +1,160 @@
 use tokio::process::Command;
 
 #[derive(Debug, Clone, PartialEq)]
+pub enum ShellFeature {
+    Pipes,           // |
+    LogicalOps,      // && ||
+    Semicolons,      // ;
+    InputRedirects,  // <
+    OutputRedirects, // > >>
+    Substitutions,   // $(...) and `...`
+}
+
+impl std::fmt::Display for ShellFeature {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ShellFeature::Pipes => write!(f, "pipes"),
+            ShellFeature::LogicalOps => write!(f, "logical-ops"),
+            ShellFeature::Semicolons => write!(f, "semicolons"),
+            ShellFeature::InputRedirects => write!(f, "input-redirects"),
+            ShellFeature::OutputRedirects => write!(f, "output-redirects"),
+            ShellFeature::Substitutions => write!(f, "substitutions"),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub enum ValidationError {
+    CommandNotAllowed {
+        command: String,
+    },
+    CommandDisabled {
+        command: String,
+    },
+    FeatureDisabled {
+        feature: ShellFeature,
+    },
+    NestedValidationError {
+        node_type: String,
+        inner: Box<ValidationError>,
+    },
+}
+
+#[derive(Debug, Clone)]
+pub struct CommandConfig {
+    pub allow_all: bool,
+    pub allowed_commands: std::collections::HashSet<String>,
+    pub disabled_commands: std::collections::HashSet<String>,
+}
+
+impl CommandConfig {
+    pub fn from_env() -> Self {
+        let commands_str = std::env::var("SHELL_COMMANDS")
+            .unwrap_or_else(|_| "ls,cat,grep,find,echo,pwd".to_string());
+
+        let allow_all = commands_str.trim() == "*";
+        let allowed_commands = if allow_all {
+            std::collections::HashSet::new()
+        } else {
+            commands_str
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect()
+        };
+
+        let disabled_commands = std::env::var("SHELL_DISABLED_COMMANDS")
+            .unwrap_or_default()
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+
+        Self {
+            allow_all,
+            allowed_commands,
+            disabled_commands,
+        }
+    }
+
+    pub fn is_command_allowed(&self, command: &str) -> bool {
+        if self.disabled_commands.contains(command) {
+            return false;
+        }
+        if self.allow_all {
+            return true;
+        }
+        self.allowed_commands.contains(command)
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct FeatureConfig {
+    pub allow_pipes: bool,
+    pub allow_logical_ops: bool,
+    pub allow_semicolons: bool,
+    pub allow_input_redirects: bool,
+    pub allow_output_redirects: bool,
+    pub allow_substitutions: bool,
+}
+
+impl Default for FeatureConfig {
+    fn default() -> Self {
+        Self::all_enabled()
+    }
+}
+
+impl FeatureConfig {
+    pub fn all_enabled() -> Self {
+        Self {
+            allow_pipes: true,
+            allow_logical_ops: true,
+            allow_semicolons: true,
+            allow_input_redirects: true,
+            allow_output_redirects: true,
+            allow_substitutions: true,
+        }
+    }
+
+    pub fn all_disabled() -> Self {
+        Self {
+            allow_pipes: false,
+            allow_logical_ops: false,
+            allow_semicolons: false,
+            allow_input_redirects: false,
+            allow_output_redirects: false,
+            allow_substitutions: false,
+        }
+    }
+
+    pub fn from_enabled_features(features: &[ShellFeature]) -> Self {
+        Self {
+            allow_pipes: features.contains(&ShellFeature::Pipes),
+            allow_logical_ops: features.contains(&ShellFeature::LogicalOps),
+            allow_semicolons: features.contains(&ShellFeature::Semicolons),
+            allow_input_redirects: features.contains(&ShellFeature::InputRedirects),
+            allow_output_redirects: features.contains(&ShellFeature::OutputRedirects),
+            allow_substitutions: features.contains(&ShellFeature::Substitutions),
+        }
+    }
+
+    pub fn from_disabled_features(disabled: &[ShellFeature]) -> Self {
+        let mut config = Self::all_enabled();
+        for feature in disabled {
+            match feature {
+                ShellFeature::Pipes => config.allow_pipes = false,
+                ShellFeature::LogicalOps => config.allow_logical_ops = false,
+                ShellFeature::Semicolons => config.allow_semicolons = false,
+                ShellFeature::InputRedirects => config.allow_input_redirects = false,
+                ShellFeature::OutputRedirects => config.allow_output_redirects = false,
+                ShellFeature::Substitutions => config.allow_substitutions = false,
+            }
+        }
+        config
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub enum Arg {
     Literal(String),
     Substitution(usize),
@@ -37,31 +191,119 @@ pub enum Redirect {
 
 pub fn validate_ast(
     ast: &ShellNode,
-    allowed_commands: &std::collections::HashSet<String>,
-) -> Result<(), String> {
+    command_config: &CommandConfig,
+    config: &FeatureConfig,
+) -> Result<(), ValidationError> {
     match ast {
         ShellNode::Command {
             args,
+            redirects,
             substitutions,
-            ..
         } => {
             // Check the first arg if it's a literal command
             if let Some(Arg::Literal(cmd)) = args.first() {
-                if !allowed_commands.contains(cmd) {
-                    return Err(format!("Command '{}' is not in the whitelist", cmd));
+                if !command_config.is_command_allowed(cmd) {
+                    if command_config.disabled_commands.contains(cmd) {
+                        return Err(ValidationError::CommandDisabled {
+                            command: cmd.clone(),
+                        });
+                    } else {
+                        return Err(ValidationError::CommandNotAllowed {
+                            command: cmd.clone(),
+                        });
+                    }
                 }
             }
+
+            // Check feature restrictions
+            if !config.allow_substitutions && !substitutions.is_empty() {
+                return Err(ValidationError::FeatureDisabled {
+                    feature: ShellFeature::Substitutions,
+                });
+            }
+
+            for redirect in redirects {
+                match redirect {
+                    Redirect::Input(_) if !config.allow_input_redirects => {
+                        return Err(ValidationError::FeatureDisabled {
+                            feature: ShellFeature::InputRedirects,
+                        });
+                    }
+                    Redirect::Output(_, _) if !config.allow_output_redirects => {
+                        return Err(ValidationError::FeatureDisabled {
+                            feature: ShellFeature::OutputRedirects,
+                        });
+                    }
+                    _ => {}
+                }
+            }
+
             // Validate all substitutions
             for subst in substitutions {
-                validate_ast(subst, allowed_commands)?;
+                if let Err(e) = validate_ast(subst, command_config, config) {
+                    return Err(ValidationError::NestedValidationError {
+                        node_type: "substitution".to_string(),
+                        inner: Box::new(e),
+                    });
+                }
             }
         }
-        ShellNode::Pipe(left, right)
-        | ShellNode::And(left, right)
-        | ShellNode::Or(left, right)
-        | ShellNode::Semicolon(left, right) => {
-            validate_ast(left, allowed_commands)?;
-            validate_ast(right, allowed_commands)?;
+        ShellNode::Pipe(left, right) => {
+            if !config.allow_pipes {
+                return Err(ValidationError::FeatureDisabled {
+                    feature: ShellFeature::Pipes,
+                });
+            }
+            if let Err(e) = validate_ast(left, command_config, config) {
+                return Err(ValidationError::NestedValidationError {
+                    node_type: "left side of pipe".to_string(),
+                    inner: Box::new(e),
+                });
+            }
+            if let Err(e) = validate_ast(right, command_config, config) {
+                return Err(ValidationError::NestedValidationError {
+                    node_type: "right side of pipe".to_string(),
+                    inner: Box::new(e),
+                });
+            }
+        }
+        ShellNode::And(left, right) | ShellNode::Or(left, right) => {
+            if !config.allow_logical_ops {
+                return Err(ValidationError::FeatureDisabled {
+                    feature: ShellFeature::LogicalOps,
+                });
+            }
+            if let Err(e) = validate_ast(left, command_config, config) {
+                return Err(ValidationError::NestedValidationError {
+                    node_type: "left side of logical operator".to_string(),
+                    inner: Box::new(e),
+                });
+            }
+            if let Err(e) = validate_ast(right, command_config, config) {
+                return Err(ValidationError::NestedValidationError {
+                    node_type: "right side of logical operator".to_string(),
+                    inner: Box::new(e),
+                });
+            }
+        }
+        ShellNode::Semicolon(left, right) => {
+            if !config.allow_semicolons {
+                return Err(ValidationError::FeatureDisabled {
+                    feature: ShellFeature::Semicolons,
+                });
+            }
+            if let Err(e) = validate_ast(left, command_config, config) {
+                return Err(ValidationError::NestedValidationError {
+                    node_type: "left side of semicolon".to_string(),
+                    inner: Box::new(e),
+                });
+            }
+            if let Err(e) = validate_ast(right, command_config, config) {
+                return Err(ValidationError::NestedValidationError {
+                    node_type: "right side of semicolon".to_string(),
+                    inner: Box::new(e),
+                });
+            }
         }
     }
     Ok(())
@@ -187,6 +429,239 @@ fn shell_escape(arg: &str) -> String {
         format!("'{}'", arg.replace('\'', "\\'"))
     } else {
         arg.to_string()
+    }
+}
+
+#[cfg(test)]
+mod feature_config_tests {
+    use super::*;
+    use crate::pest_parser::parse_shell;
+    use std::collections::HashSet;
+
+    #[test]
+    fn test_feature_config_default_all_enabled() {
+        let config = FeatureConfig::default();
+        assert!(config.allow_pipes);
+        assert!(config.allow_logical_ops);
+        assert!(config.allow_semicolons);
+        assert!(config.allow_input_redirects);
+        assert!(config.allow_output_redirects);
+        assert!(config.allow_substitutions);
+    }
+
+    #[test]
+    fn test_feature_config_from_enabled_features() {
+        let enabled = vec![ShellFeature::Pipes, ShellFeature::OutputRedirects];
+        let config = FeatureConfig::from_enabled_features(&enabled);
+
+        assert!(config.allow_pipes);
+        assert!(!config.allow_logical_ops);
+        assert!(!config.allow_semicolons);
+        assert!(!config.allow_input_redirects);
+        assert!(config.allow_output_redirects);
+        assert!(!config.allow_substitutions);
+    }
+
+    #[test]
+    fn test_feature_config_from_disabled_features_single() {
+        let disabled = vec![ShellFeature::Substitutions];
+        let config = FeatureConfig::from_disabled_features(&disabled);
+
+        assert!(config.allow_pipes);
+        assert!(config.allow_logical_ops);
+        assert!(config.allow_semicolons);
+        assert!(config.allow_input_redirects);
+        assert!(config.allow_output_redirects);
+        assert!(!config.allow_substitutions); // This should be disabled
+    }
+
+    #[test]
+    fn test_feature_config_from_disabled_features_multiple() {
+        let disabled = vec![
+            ShellFeature::Pipes,
+            ShellFeature::LogicalOps,
+            ShellFeature::Substitutions,
+        ];
+        let config = FeatureConfig::from_disabled_features(&disabled);
+
+        assert!(!config.allow_pipes); // Disabled
+        assert!(!config.allow_logical_ops); // Disabled
+        assert!(config.allow_semicolons);
+        assert!(config.allow_input_redirects);
+        assert!(config.allow_output_redirects);
+        assert!(!config.allow_substitutions); // Disabled
+    }
+
+    #[test]
+    fn test_feature_config_from_disabled_features_empty() {
+        let disabled: Vec<ShellFeature> = vec![];
+        let config = FeatureConfig::from_disabled_features(&disabled);
+
+        // All should be enabled when no features are disabled
+        assert!(config.allow_pipes);
+        assert!(config.allow_logical_ops);
+        assert!(config.allow_semicolons);
+        assert!(config.allow_input_redirects);
+        assert!(config.allow_output_redirects);
+        assert!(config.allow_substitutions);
+    }
+
+    #[test]
+    fn test_validate_pipes_disabled() {
+        let mut allowed = HashSet::new();
+        allowed.insert("ls".to_string());
+        allowed.insert("grep".to_string());
+
+        let command_config = CommandConfig {
+            allow_all: false,
+            allowed_commands: allowed,
+            disabled_commands: HashSet::new(),
+        };
+        let config = FeatureConfig::all_disabled();
+
+        let ast = parse_shell("ls | grep test").unwrap();
+        assert!(validate_ast(&ast, &command_config, &config).is_err());
+    }
+
+    #[test]
+    fn test_validate_logical_ops_disabled() {
+        let mut allowed = HashSet::new();
+        allowed.insert("echo".to_string());
+
+        let command_config = CommandConfig {
+            allow_all: false,
+            allowed_commands: allowed,
+            disabled_commands: HashSet::new(),
+        };
+        let config = FeatureConfig::all_disabled();
+
+        let ast = parse_shell("echo hello && echo world").unwrap();
+        assert!(validate_ast(&ast, &command_config, &config).is_err());
+    }
+
+    #[test]
+    fn test_validate_semicolons_disabled() {
+        let mut allowed = HashSet::new();
+        allowed.insert("echo".to_string());
+
+        let command_config = CommandConfig {
+            allow_all: false,
+            allowed_commands: allowed,
+            disabled_commands: HashSet::new(),
+        };
+        let config = FeatureConfig::all_disabled();
+
+        // Test direct semicolon (may not parse due to grammar limitations)
+        let result = parse_shell("echo hello; echo world");
+        if let Some(ast) = result {
+            assert!(validate_ast(&ast, &command_config, &config).is_err());
+        }
+    }
+
+    #[test]
+    fn test_validate_input_redirects_disabled() {
+        let mut allowed = HashSet::new();
+        allowed.insert("grep".to_string());
+
+        let command_config = CommandConfig {
+            allow_all: false,
+            allowed_commands: allowed,
+            disabled_commands: HashSet::new(),
+        };
+        let config = FeatureConfig::all_disabled();
+
+        let ast = parse_shell("grep pattern < input.txt").unwrap();
+        assert!(validate_ast(&ast, &command_config, &config).is_err());
+    }
+
+    #[test]
+    fn test_validate_output_redirects_disabled() {
+        let mut allowed = HashSet::new();
+        allowed.insert("echo".to_string());
+
+        let command_config = CommandConfig {
+            allow_all: false,
+            allowed_commands: allowed,
+            disabled_commands: HashSet::new(),
+        };
+        let config = FeatureConfig::all_disabled();
+
+        let ast = parse_shell("echo hello > output.txt").unwrap();
+        assert!(validate_ast(&ast, &command_config, &config).is_err());
+    }
+
+    #[test]
+    fn test_validate_substitutions_disabled() {
+        let mut allowed = HashSet::new();
+        allowed.insert("echo".to_string());
+
+        let command_config = CommandConfig {
+            allow_all: false,
+            allowed_commands: allowed,
+            disabled_commands: HashSet::new(),
+        };
+        let config = FeatureConfig::all_disabled();
+
+        let ast = parse_shell("echo $(date)").unwrap();
+        assert!(validate_ast(&ast, &command_config, &config).is_err());
+    }
+
+    #[test]
+    fn test_validate_backtick_substitutions_disabled() {
+        let mut allowed = HashSet::new();
+        allowed.insert("echo".to_string());
+
+        let command_config = CommandConfig {
+            allow_all: false,
+            allowed_commands: allowed,
+            disabled_commands: HashSet::new(),
+        };
+        let config = FeatureConfig::all_disabled();
+
+        let ast = parse_shell("echo `date`").unwrap();
+        assert!(validate_ast(&ast, &command_config, &config).is_err());
+    }
+
+    #[test]
+    fn test_validate_allowed_features_work() {
+        let mut allowed = HashSet::new();
+        allowed.insert("echo".to_string());
+        allowed.insert("ls".to_string());
+        allowed.insert("grep".to_string());
+
+        let command_config = CommandConfig {
+            allow_all: false,
+            allowed_commands: allowed,
+            disabled_commands: HashSet::new(),
+        };
+        let config = FeatureConfig {
+            allow_pipes: true,
+            allow_output_redirects: true,
+            ..FeatureConfig::all_disabled()
+        };
+
+        // Should allow pipes and output redirects
+        let ast1 = parse_shell("ls | grep test").unwrap();
+        assert!(validate_ast(&ast1, &command_config, &config).is_ok());
+
+        let ast2 = parse_shell("echo hello > output.txt").unwrap();
+        assert!(validate_ast(&ast2, &command_config, &config).is_ok());
+    }
+
+    #[test]
+    fn test_shell_feature_display() {
+        assert_eq!(format!("{}", ShellFeature::Pipes), "pipes");
+        assert_eq!(format!("{}", ShellFeature::LogicalOps), "logical-ops");
+        assert_eq!(format!("{}", ShellFeature::Semicolons), "semicolons");
+        assert_eq!(
+            format!("{}", ShellFeature::InputRedirects),
+            "input-redirects"
+        );
+        assert_eq!(
+            format!("{}", ShellFeature::OutputRedirects),
+            "output-redirects"
+        );
+        assert_eq!(format!("{}", ShellFeature::Substitutions), "substitutions");
     }
 }
 

@@ -178,7 +178,7 @@ fn parse_redirect(pair: pest::iterators::Pair<Rule>) -> Option<Redirect> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::shell::validate_ast;
+    use crate::shell::{validate_ast, FeatureConfig};
     use std::collections::HashSet;
 
     #[test]
@@ -228,10 +228,15 @@ mod tests {
         allowed.insert("ls".to_string());
         allowed.insert("grep".to_string());
 
+        let command_config = crate::shell::CommandConfig {
+            allow_all: false,
+            allowed_commands: allowed,
+            disabled_commands: HashSet::new(),
+        };
         let ast = parse_shell("ls | grep txt").unwrap();
 
         // Test that validation works with pest-generated AST
-        assert!(validate_ast(&ast, &allowed).is_ok());
+        assert!(validate_ast(&ast, &command_config, &FeatureConfig::default()).is_ok());
     }
 
     #[test]
@@ -284,8 +289,13 @@ mod tests {
         allowed.insert("ls".to_string());
         allowed.insert("grep".to_string());
 
+        let command_config = crate::shell::CommandConfig {
+            allow_all: false,
+            allowed_commands: allowed,
+            disabled_commands: HashSet::new(),
+        };
         let ast = parse_shell("ls -la | grep txt").unwrap();
-        assert!(validate_ast(&ast, &allowed).is_ok());
+        assert!(validate_ast(&ast, &command_config, &FeatureConfig::default()).is_ok());
     }
 
     #[test]
@@ -293,8 +303,13 @@ mod tests {
         let mut allowed = HashSet::new();
         allowed.insert("ls".to_string());
 
+        let command_config = crate::shell::CommandConfig {
+            allow_all: false,
+            allowed_commands: allowed,
+            disabled_commands: HashSet::new(),
+        };
         let ast = parse_shell("ls | rm -rf /").unwrap();
-        assert!(validate_ast(&ast, &allowed).is_err());
+        assert!(validate_ast(&ast, &command_config, &FeatureConfig::default()).is_err());
     }
 
     #[test]
@@ -316,9 +331,14 @@ mod tests {
     fn test_disallowed_command_in_substitution() {
         let mut allowed = HashSet::new();
         allowed.insert("echo".to_string());
+        let command_config = crate::shell::CommandConfig {
+            allow_all: false,
+            allowed_commands: allowed,
+            disabled_commands: HashSet::new(),
+        };
         let ast = parse_shell("echo $(rm -rf /)").unwrap();
         // Now this should fail because rm is not in the allowed list
-        assert!(validate_ast(&ast, &allowed).is_err());
+        assert!(validate_ast(&ast, &command_config, &FeatureConfig::default()).is_err());
     }
 
     #[test]
@@ -326,8 +346,13 @@ mod tests {
         let mut allowed = HashSet::new();
         allowed.insert("echo".to_string());
         allowed.insert("date".to_string());
+        let command_config = crate::shell::CommandConfig {
+            allow_all: false,
+            allowed_commands: allowed,
+            disabled_commands: HashSet::new(),
+        };
         let ast = parse_shell("echo $(date)").unwrap();
-        assert!(validate_ast(&ast, &allowed).is_ok());
+        assert!(validate_ast(&ast, &command_config, &FeatureConfig::default()).is_ok());
     }
 
     #[test]
@@ -335,8 +360,13 @@ mod tests {
         let mut allowed = HashSet::new();
         allowed.insert("echo".to_string());
         allowed.insert("cat".to_string());
+        let command_config = crate::shell::CommandConfig {
+            allow_all: false,
+            allowed_commands: allowed,
+            disabled_commands: HashSet::new(),
+        };
         let ast = parse_shell("echo $(cat $(echo hello))").unwrap();
-        assert!(validate_ast(&ast, &allowed).is_ok());
+        assert!(validate_ast(&ast, &command_config, &FeatureConfig::default()).is_ok());
     }
 
     #[test]
@@ -344,8 +374,13 @@ mod tests {
         let mut allowed = HashSet::new();
         allowed.insert("echo".to_string());
         allowed.insert("cat".to_string());
+        let command_config = crate::shell::CommandConfig {
+            allow_all: false,
+            allowed_commands: allowed,
+            disabled_commands: HashSet::new(),
+        };
         let ast = parse_shell("echo $(cat $(rm -rf /))").unwrap();
-        assert!(validate_ast(&ast, &allowed).is_err());
+        assert!(validate_ast(&ast, &command_config, &FeatureConfig::default()).is_err());
     }
 
     #[test]
@@ -353,16 +388,26 @@ mod tests {
         let mut allowed = HashSet::new();
         allowed.insert("echo".to_string());
         allowed.insert("date".to_string());
+        let command_config = crate::shell::CommandConfig {
+            allow_all: false,
+            allowed_commands: allowed,
+            disabled_commands: HashSet::new(),
+        };
         let ast = parse_shell("echo `date`").unwrap();
-        assert!(validate_ast(&ast, &allowed).is_ok());
+        assert!(validate_ast(&ast, &command_config, &FeatureConfig::default()).is_ok());
     }
 
     #[test]
     fn test_backtick_substitution_with_disallowed() {
         let mut allowed = HashSet::new();
         allowed.insert("echo".to_string());
+        let command_config = crate::shell::CommandConfig {
+            allow_all: false,
+            allowed_commands: allowed,
+            disabled_commands: HashSet::new(),
+        };
         let ast = parse_shell("echo `rm -rf /`").unwrap();
-        assert!(validate_ast(&ast, &allowed).is_err());
+        assert!(validate_ast(&ast, &command_config, &FeatureConfig::default()).is_err());
     }
 
     #[test]
@@ -371,8 +416,13 @@ mod tests {
         allowed.insert("echo".to_string());
         allowed.insert("date".to_string());
         allowed.insert("pwd".to_string());
+        let command_config = crate::shell::CommandConfig {
+            allow_all: false,
+            allowed_commands: allowed,
+            disabled_commands: HashSet::new(),
+        };
         let ast = parse_shell("echo $(date) `pwd`").unwrap();
-        assert!(validate_ast(&ast, &allowed).is_ok());
+        assert!(validate_ast(&ast, &command_config, &FeatureConfig::default()).is_ok());
     }
 
     #[test]
@@ -381,8 +431,13 @@ mod tests {
         allowed.insert("echo".to_string());
         allowed.insert("cat".to_string());
         allowed.insert("grep".to_string());
+        let command_config = crate::shell::CommandConfig {
+            allow_all: false,
+            allowed_commands: allowed,
+            disabled_commands: HashSet::new(),
+        };
         let ast = parse_shell("echo $(cat file.txt | grep pattern)").unwrap();
-        assert!(validate_ast(&ast, &allowed).is_ok());
+        assert!(validate_ast(&ast, &command_config, &FeatureConfig::default()).is_ok());
     }
 
     #[test]
@@ -390,8 +445,13 @@ mod tests {
         let mut allowed = HashSet::new();
         allowed.insert("echo".to_string());
         allowed.insert("cat".to_string());
+        let command_config = crate::shell::CommandConfig {
+            allow_all: false,
+            allowed_commands: allowed,
+            disabled_commands: HashSet::new(),
+        };
         let ast = parse_shell("echo $(cat file.txt | rm -rf /)").unwrap();
-        assert!(validate_ast(&ast, &allowed).is_err());
+        assert!(validate_ast(&ast, &command_config, &FeatureConfig::default()).is_err());
     }
 
     #[test]
