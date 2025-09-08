@@ -1,0 +1,23 @@
+WHITESPACE = _{ " " | "\t" | "\n" | "\r" }
+
+expression = { pipe_expression ~ (logical_op ~ pipe_expression)* ~ (semicolon_op ~ expression)* }
+pipe_expression = { command ~ (pipe_op ~ command)* }
+
+// A command is one or more tokens (words or substitutions) followed by optional redirects
+command = { (substitution | backtick_substitution | command_text)+ ~ redirect* }
+
+// command_text represents plain words (quotes allowed) but stops at operators, whitespace, $ and backtick
+command_text = { (!redirect_op ~ !pipe_op ~ !logical_op ~ !semicolon_op ~ !WHITESPACE ~ !"$" ~ !"`" ~ !")" ~ !"|" ~ ANY)+ }
+
+// Command substitution forms
+substitution = { "$(" ~ expression ~ ")" }
+backtick_substitution = { "`" ~ (!"`" ~ ANY)* ~ "`" }
+
+redirect = { redirect_op ~ redirect_target }
+redirect_target = { (!redirect_op ~ !pipe_op ~ !logical_op ~ !semicolon_op ~ !WHITESPACE ~ ANY)+ }
+redirect_op = { ">>" | ">" | "<" }
+
+// Ensure pipe_op only matches a single '|' (so '||' becomes logical_op)
+pipe_op = { "|" ~ !"|" }
+logical_op = { "&&" | "||" }
+semicolon_op = { ";" }

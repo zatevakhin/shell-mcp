@@ -1,17 +1,26 @@
+use clap::{Parser, ValueEnum};
 use rmcp::transport::sse_server::{SseServer, SseServerConfig};
+use rmcp::{
+    ErrorData as McpError, elicit_safe,
+    model::{CallToolResult, Content},
+    service::{RequestContext, RoleServer},
+};
 use tracing_subscriber::{
     layer::SubscriberExt,
     util::SubscriberInitExt,
     {self},
 };
-use clap::{Parser, ValueEnum};
-use rmcp::{elicit_safe, service::{RequestContext, RoleServer}, ErrorData as McpError, model::{CallToolResult, Content}};
+
+mod pest_parser;
+mod shell;
+
+use pest_parser::parse_shell;
 use std::collections::HashSet;
 use std::sync::Arc;
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
-#[derive(Clone, Debug, ValueEnum)]
+#[derive(Clone, Debug, ValueEnum, PartialEq)]
 enum Transport {
     Sse,
     Stdio,
@@ -28,8 +37,6 @@ impl std::fmt::Display for Transport {
     }
 }
 
-
-
 #[derive(Parser)]
 #[command(name = "shell-mcp")]
 struct Args {
@@ -41,27 +48,18 @@ struct Args {
 
 use rmcp::{
     ServerHandler,
-    handler::server::{
-        router::tool::ToolRouter,
-        wrapper::Parameters,
-    },
+    handler::server::{router::tool::ToolRouter, wrapper::Parameters},
     model::{ServerCapabilities, ServerInfo},
-    schemars, tool, tool_handler, tool_router,
-    serve_server,
+    schemars, serve_server, tool, tool_handler, tool_router,
     transport::io::stdio,
-    transport::streamable_http_server::tower::{
-        StreamableHttpService,
-        StreamableHttpServerConfig,
-    },
     transport::streamable_http_server::session::local::LocalSessionManager,
+    transport::streamable_http_server::tower::{StreamableHttpServerConfig, StreamableHttpService},
 };
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct ExecuteCommandRequest {
     #[schemars(description = "The shell command to execute")]
     pub command: String,
-    #[schemars(description = "Optional arguments for the command")]
-    pub args: Option<Vec<String>>,
     #[schemars(description = "Optional working directory; defaults to current directory")]
     pub cwd: Option<String>,
 }
@@ -107,59 +105,99 @@ impl ShellExecutor {
     }
 
     #[tool(description = "Execute a shell command and return the output")]
-    async fn shell(&self, context: RequestContext<RoleServer>, Parameters(ExecuteCommandRequest { command, args, cwd }): Parameters<ExecuteCommandRequest>) -> Result<CallToolResult, McpError> {
+    async fn shell(
+        &self,
+        context: RequestContext<RoleServer>,
+        Parameters(ExecuteCommandRequest { command, cwd }): Parameters<ExecuteCommandRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        // Parse the command into AST
+        let ast = match parse_shell(&command) {
+            Some(ast) => ast,
+            None => {
+                return Ok(CallToolResult::success(vec![Content::text(
+                    "Failed to parse command".to_string(),
+                )]));
+            }
+        };
+
         // Get allowed commands from environment variable or use defaults
         let allowed_commands = get_allowed_commands();
-        let is_allowed = allowed_commands.contains(&command);
 
-        if !is_allowed {
+        // Validate the AST against allowed commands
+        if let Err(validation_error) = shell::validate_ast(&ast, &allowed_commands) {
             // Elicit confirmation for non-whitelisted commands
-            match context.peer.elicit::<Confirmation>(format!("Command '{}' is not in the whitelist. Confirm execution?", command)).await {
+            match context
+                .peer
+                .elicit::<Confirmation>(format!("{} Confirm execution?", validation_error))
+                .await
+            {
                 Ok(Some(conf)) if conf.confirm => {
-                    // Proceed with execution
+                    // Proceed with execution despite validation error
                 }
                 Ok(Some(_)) => {
-                    return Ok(CallToolResult::success(vec![Content::text("Command execution cancelled by user.".to_string())]));
+                    return Ok(CallToolResult::success(vec![Content::text(
+                        "Command execution cancelled by user.".to_string(),
+                    )]));
                 }
                 Ok(None) => {
-                    return Ok(CallToolResult::success(vec![Content::text("No confirmation provided.".to_string())]));
+                    return Ok(CallToolResult::success(vec![Content::text(
+                        "No confirmation provided.".to_string(),
+                    )]));
                 }
                 Err(e) => {
-                    return Err(McpError::internal_error(format!("Elicitation error: {}", e), None));
+                    return Err(McpError::internal_error(
+                        format!("Elicitation error: {}", e),
+                        None,
+                    ));
                 }
             }
         }
 
-        let mut cmd = tokio::process::Command::new(&command);
-        if let Some(args) = args {
-            cmd.args(args);
-        }
-        let cwd = cwd.filter(|s| !s.is_empty()).unwrap_or_else(|| std::env::current_dir().unwrap().to_string_lossy().to_string());
-        cmd.current_dir(&cwd);
+        let cwd_str = cwd.filter(|s| !s.is_empty()).unwrap_or_else(|| {
+            std::env::current_dir()
+                .unwrap()
+                .to_string_lossy()
+                .to_string()
+        });
 
-        match tokio::time::timeout(std::time::Duration::from_secs(self.timeout_secs), cmd.output()).await {
-            Ok(Ok(output)) => {
-                let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-                let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-                let exit_code = output.status.code().unwrap_or(-1);
-                let success = output.status.success();
+        // Convert AST back to shell command string
+        let shell_command = match shell::ast_to_shell_string(&ast) {
+            Ok(cmd) => cmd,
+            Err(e) => {
+                return Ok(CallToolResult::success(vec![Content::text(format!(
+                    "Failed to convert AST to shell command: {}",
+                    e
+                ))]));
+            }
+        };
+
+        // Execute the full command through shell
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(self.timeout_secs),
+            shell::execute_through_shell(&shell_command, Some(&cwd_str)),
+        )
+        .await
+        {
+            Ok(Ok(result)) => {
                 let response = ExecuteCommandResponse {
-                    stdout,
-                    stderr,
-                    exit_code,
-                    success,
+                    stdout: result.stdout,
+                    stderr: result.stderr,
+                    exit_code: result.exit_code,
+                    success: result.success,
                 };
-                let json = serde_json::to_string(&response).unwrap_or_else(|_| "Serialization error".to_string());
+                let json = serde_json::to_string(&response)
+                    .unwrap_or_else(|_| "Serialization error".to_string());
                 Ok(CallToolResult::success(vec![Content::text(json)]))
             }
             Ok(Err(e)) => {
                 let response = ExecuteCommandResponse {
                     stdout: String::new(),
-                    stderr: format!("Execution error: {}", e),
+                    stderr: format!("Shell execution error: {}", e),
                     exit_code: 1,
                     success: false,
                 };
-                let json = serde_json::to_string(&response).unwrap_or_else(|_| "Serialization error".to_string());
+                let json = serde_json::to_string(&response)
+                    .unwrap_or_else(|_| "Serialization error".to_string());
                 Ok(CallToolResult::success(vec![Content::text(json)]))
             }
             Err(_) => {
@@ -169,7 +207,8 @@ impl ShellExecutor {
                     exit_code: 1,
                     success: false,
                 };
-                let json = serde_json::to_string(&response).unwrap_or_else(|_| "Serialization error".to_string());
+                let json = serde_json::to_string(&response)
+                    .unwrap_or_else(|_| "Serialization error".to_string());
                 Ok(CallToolResult::success(vec![Content::text(json)]))
             }
         }
@@ -180,7 +219,9 @@ impl ShellExecutor {
 impl ServerHandler for ShellExecutor {
     fn get_info(&self) -> ServerInfo {
         ServerInfo {
-            instructions: Some("A shell command executor MCP server with elicitation support".into()),
+            instructions: Some(
+                "A shell command executor MCP server with elicitation support".into(),
+            ),
             capabilities: ServerCapabilities::builder().enable_tools().build(),
             ..Default::default()
         }
@@ -209,17 +250,26 @@ async fn main() -> anyhow::Result<()> {
     let show_startup_info = std::env::var("SHELL_MCP_STARTUP_INFO")
         .map(|s| s != "false" && s != "0")
         .unwrap_or(true);
-
-    if show_startup_info {
+    // Disable it on stdio
+    if show_startup_info && args.transport != Transport::Stdio {
         println!("\x1b[1;36mShell-MCP v{} Server Starting...\x1b[0m", VERSION);
         println!("\x1b[1mAddress:\x1b[0m {}", args.bind);
         println!("\x1b[1mTransport:\x1b[0m {}", args.transport);
         println!("\x1b[1mTimeout:\x1b[0m {}s", timeout);
 
         let allowed_commands = get_allowed_commands();
-        println!("\x1b[1mAllowed commands:\x1b[0m {}", allowed_commands.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", "));
+        println!(
+            "\x1b[1mAllowed commands:\x1b[0m {}",
+            allowed_commands
+                .iter()
+                .map(|s| s.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
 
-        println!("\x1b[38;5;196mS\x1b[38;5;202me\x1b[38;5;208mr\x1b[38;5;214mv\x1b[38;5;220me\x1b[38;5;226mr\x1b[38;5;190m \x1b[38;5;154mr\x1b[38;5;118me\x1b[38;5;82ma\x1b[38;5;46md\x1b[38;5;47my\x1b[38;5;48m!\x1b[0m");
+        println!(
+            "\x1b[38;5;196mS\x1b[38;5;202me\x1b[38;5;208mr\x1b[38;5;214mv\x1b[38;5;220me\x1b[38;5;226mr\x1b[38;5;190m \x1b[38;5;154mr\x1b[38;5;118me\x1b[38;5;82ma\x1b[38;5;46md\x1b[38;5;47my\x1b[38;5;48m!\x1b[0m"
+        );
     }
 
     // Read streamable HTTP configuration from environment variables
@@ -287,10 +337,9 @@ async fn main() -> anyhow::Result<()> {
 
             let app = axum::Router::new().fallback_service(service);
 
-            let server = axum::serve(listener, app)
-                .with_graceful_shutdown(async move {
-                    tokio::signal::ctrl_c().await.ok();
-                });
+            let server = axum::serve(listener, app).with_graceful_shutdown(async move {
+                tokio::signal::ctrl_c().await.ok();
+            });
 
             server.await?;
         }
