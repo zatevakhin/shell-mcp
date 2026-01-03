@@ -15,7 +15,7 @@ mod pest_parser;
 mod shell;
 
 use pest_parser::parse_shell;
-use std::sync::Arc;
+use std::{path::PathBuf, sync::Arc};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -43,6 +43,13 @@ struct Args {
     bind: String,
     #[arg(short = 't', long, default_value_t = Transport::Stdio)]
     transport: Transport,
+    #[arg(
+        short = 'w',
+        long,
+        value_name = "PATH",
+        help = "Default working directory for executed commands"
+    )]
+    workdir: Option<PathBuf>,
 }
 
 use rmcp::{
@@ -59,8 +66,6 @@ use rmcp::{
 pub struct ExecuteCommandRequest {
     #[schemars(description = "The shell command to execute")]
     pub command: String,
-    #[schemars(description = "Optional working directory; defaults to current directory")]
-    pub cwd: Option<String>,
 }
 
 #[derive(Debug, serde::Serialize, schemars::JsonSchema)]
@@ -277,14 +282,16 @@ fn get_shell_features() -> shell::FeatureConfig {
 pub struct ShellExecutor {
     tool_router: ToolRouter<Self>,
     timeout_secs: u64,
+    default_cwd: PathBuf,
 }
 
 #[tool_router]
 impl ShellExecutor {
-    pub fn new(timeout_secs: u64) -> Self {
+    pub fn new(timeout_secs: u64, default_cwd: PathBuf) -> Self {
         Self {
             tool_router: Self::tool_router(),
             timeout_secs,
+            default_cwd,
         }
     }
 
@@ -292,7 +299,7 @@ impl ShellExecutor {
     async fn shell(
         &self,
         context: RequestContext<RoleServer>,
-        Parameters(ExecuteCommandRequest { command, cwd }): Parameters<ExecuteCommandRequest>,
+        Parameters(ExecuteCommandRequest { command }): Parameters<ExecuteCommandRequest>,
     ) -> Result<CallToolResult, McpError> {
         // Parse the command into AST
         let ast = match parse_shell(&command) {
@@ -382,12 +389,7 @@ impl ShellExecutor {
             }
         }
 
-        let cwd_str = cwd.filter(|s| !s.is_empty()).unwrap_or_else(|| {
-            std::env::current_dir()
-                .unwrap()
-                .to_string_lossy()
-                .to_string()
-        });
+        let cwd_str = self.default_cwd.to_string_lossy().to_string();
 
         // Convert AST back to shell command string
         let shell_command = match shell::ast_to_shell_string(&ast) {
@@ -460,6 +462,10 @@ impl ServerHandler for ShellExecutor {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
+    let default_cwd = match args.workdir.clone() {
+        Some(path) => path,
+        None => std::env::current_dir()?,
+    };
 
     // Read timeout from environment variable or use default
     let timeout = std::env::var("SHELL_MCP_TIMEOUT")
@@ -485,6 +491,7 @@ async fn main() -> anyhow::Result<()> {
         println!("\x1b[1mAddress:\x1b[0m {}", args.bind);
         println!("\x1b[1mTransport:\x1b[0m {}", args.transport);
         println!("\x1b[1mTimeout:\x1b[0m {}s", timeout);
+        println!("\x1b[1mWorking directory:\x1b[0m {}", default_cwd.display());
 
         let command_config = shell::CommandConfig::from_env();
         println!(
@@ -515,7 +522,8 @@ async fn main() -> anyhow::Result<()> {
 
     match args.transport {
         Transport::Stdio => {
-            let service = serve_server(ShellExecutor::new(timeout), stdio()).await?;
+            let service =
+                serve_server(ShellExecutor::new(timeout, default_cwd.clone()), stdio()).await?;
             tokio::signal::ctrl_c().await?;
             service.cancel().await?;
         }
@@ -545,7 +553,9 @@ async fn main() -> anyhow::Result<()> {
                 }
             });
 
-            let ct = sse_server.with_service(move || ShellExecutor::new(timeout));
+            let default_cwd_for_service = default_cwd.clone();
+            let ct = sse_server
+                .with_service(move || ShellExecutor::new(timeout, default_cwd_for_service.clone()));
 
             tokio::signal::ctrl_c().await?;
             ct.cancel();
@@ -558,8 +568,9 @@ async fn main() -> anyhow::Result<()> {
 
             let session_manager = Arc::new(LocalSessionManager::default());
 
+            let default_cwd_for_service = default_cwd.clone();
             let service = StreamableHttpService::new(
-                move || Ok(ShellExecutor::new(timeout)),
+                move || Ok(ShellExecutor::new(timeout, default_cwd_for_service.clone())),
                 session_manager,
                 config,
             );

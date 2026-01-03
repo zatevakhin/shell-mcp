@@ -128,8 +128,8 @@ Shell Features Status:
 The server provides a `shell` tool that accepts:
 
 - `command`: The shell command to execute (with comprehensive validation)
-- `cwd`: Optional working directory (defaults to current directory)
 
+The default working directory for all commands is controlled via the CLI `-w/--workdir` flag.
 The tool provides enhanced error reporting with security context and user confirmation via elicitation (if available on client) for non-whitelisted commands.
 
 
@@ -141,7 +141,7 @@ The tool provides enhanced error reporting with security context and user confir
 - Context-aware error messages with detailed information
 - Shell commands are executed after parsing the input into an Abstract Syntax Tree (AST) for comprehensive validation and generation into safe shell code.
 - Timeout protection prevents hanging processes
-- Working directory can be specified to limit scope
+- Working directory can be set (**but not limited**) via the CLI `--workdir` flag
 
 **Note:** While robust, the security features are not foolproof and can be bypassed by advanced users with malicious intent (e.g., exploiting misconfigured policies). current implementation should be enough to keep LLM agents guided by policies and prevent misuse by non-advanced users.
 

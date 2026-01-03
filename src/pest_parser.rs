@@ -152,7 +152,11 @@ fn parse_command(pair: pest::iterators::Pair<Rule>) -> Option<ShellNode> {
         return None;
     }
 
-    Some(ShellNode::Command { args, redirects, substitutions })
+    Some(ShellNode::Command {
+        args,
+        redirects,
+        substitutions,
+    })
 }
 
 fn shell_split(input: &str) -> Option<Vec<String>> {
@@ -178,7 +182,7 @@ fn parse_redirect(pair: pest::iterators::Pair<Rule>) -> Option<Redirect> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::shell::{validate_ast, FeatureConfig};
+    use crate::shell::{FeatureConfig, validate_ast};
     use std::collections::HashSet;
 
     #[test]
@@ -187,7 +191,11 @@ mod tests {
         assert!(result.is_some());
         let ast = result.unwrap();
         match ast {
-            ShellNode::Command { args, redirects, substitutions } => {
+            ShellNode::Command {
+                args,
+                redirects,
+                substitutions,
+            } => {
                 assert_eq!(args, vec!["ls", "-la"]);
                 assert!(redirects.is_empty());
                 assert!(substitutions.is_empty());
@@ -204,14 +212,22 @@ mod tests {
         match ast {
             ShellNode::Pipe(left, right) => {
                 match *left {
-                    ShellNode::Command { args, substitutions, .. } => {
+                    ShellNode::Command {
+                        args,
+                        substitutions,
+                        ..
+                    } => {
                         assert_eq!(args, vec!["ls"]);
                         assert!(substitutions.is_empty());
                     }
                     _ => panic!("Expected Command"),
                 }
                 match *right {
-                    ShellNode::Command { args, substitutions, .. } => {
+                    ShellNode::Command {
+                        args,
+                        substitutions,
+                        ..
+                    } => {
                         assert_eq!(args, vec!["grep", "txt"]);
                         assert!(substitutions.is_empty());
                     }
@@ -245,14 +261,22 @@ mod tests {
         match ast {
             ShellNode::Semicolon(left, right) => {
                 match *left {
-                    ShellNode::Command { args, substitutions, .. } => {
+                    ShellNode::Command {
+                        args,
+                        substitutions,
+                        ..
+                    } => {
                         assert_eq!(args, vec!["ls"]);
                         assert!(substitutions.is_empty());
                     }
                     _ => panic!("Expected Command"),
                 }
                 match *right {
-                    ShellNode::Command { args, substitutions, .. } => {
+                    ShellNode::Command {
+                        args,
+                        substitutions,
+                        ..
+                    } => {
                         assert_eq!(args, vec!["pwd"]);
                         assert!(substitutions.is_empty());
                     }
@@ -267,7 +291,11 @@ mod tests {
     fn test_parse_redirect() {
         let ast = parse_shell("cat file.txt > output.txt").unwrap();
         match ast {
-            ShellNode::Command { args, redirects, substitutions } => {
+            ShellNode::Command {
+                args,
+                redirects,
+                substitutions,
+            } => {
                 assert_eq!(args, vec!["cat", "file.txt"]);
                 assert_eq!(redirects.len(), 1);
                 match &redirects[0] {
@@ -458,7 +486,11 @@ mod tests {
     fn test_backtick_substitution() {
         let ast = parse_shell("echo `date`").unwrap();
         match ast {
-            ShellNode::Command { args, redirects, substitutions } => {
+            ShellNode::Command {
+                args,
+                redirects,
+                substitutions,
+            } => {
                 // Check args
                 assert_eq!(args.len(), 2);
                 match &args[0] {
@@ -473,7 +505,9 @@ mod tests {
                 // Check substitutions
                 assert_eq!(substitutions.len(), 1);
                 match &substitutions[0] {
-                    ShellNode::Command { args, redirects, .. } => {
+                    ShellNode::Command {
+                        args, redirects, ..
+                    } => {
                         assert_eq!(args.len(), 1);
                         match &args[0] {
                             crate::shell::Arg::Literal(s) => assert_eq!(s, "date"),
@@ -492,7 +526,11 @@ mod tests {
     fn test_parse_append_redirect() {
         let ast = parse_shell("echo 'hello' >> file.txt").unwrap();
         match ast {
-            ShellNode::Command { args, redirects, substitutions } => {
+            ShellNode::Command {
+                args,
+                redirects,
+                substitutions,
+            } => {
                 assert_eq!(args, vec!["echo", "hello"]);
                 assert_eq!(redirects.len(), 1);
                 match &redirects[0] {
@@ -512,7 +550,11 @@ mod tests {
     fn test_parse_input_redirect() {
         let ast = parse_shell("grep 'pattern' < input.txt").unwrap();
         match ast {
-            ShellNode::Command { args, redirects, substitutions } => {
+            ShellNode::Command {
+                args,
+                redirects,
+                substitutions,
+            } => {
                 assert_eq!(args, vec!["grep", "pattern"]);
                 assert_eq!(redirects.len(), 1);
                 match &redirects[0] {
@@ -533,14 +575,22 @@ mod tests {
         match ast {
             ShellNode::And(left, right) => {
                 match *left {
-                    ShellNode::Command { args, substitutions, .. } => {
+                    ShellNode::Command {
+                        args,
+                        substitutions,
+                        ..
+                    } => {
                         assert_eq!(args, vec!["ls"]);
                         assert!(substitutions.is_empty());
                     }
                     _ => panic!("Expected Command"),
                 }
                 match *right {
-                    ShellNode::Command { args, substitutions, .. } => {
+                    ShellNode::Command {
+                        args,
+                        substitutions,
+                        ..
+                    } => {
                         assert_eq!(args, vec!["pwd"]);
                         assert!(substitutions.is_empty());
                     }
@@ -557,14 +607,22 @@ mod tests {
         match ast {
             ShellNode::Or(left, right) => {
                 match *left {
-                    ShellNode::Command { args, substitutions, .. } => {
+                    ShellNode::Command {
+                        args,
+                        substitutions,
+                        ..
+                    } => {
                         assert_eq!(args, vec!["ls"]);
                         assert!(substitutions.is_empty());
                     }
                     _ => panic!("Expected Command"),
                 }
                 match *right {
-                    ShellNode::Command { args, substitutions, .. } => {
+                    ShellNode::Command {
+                        args,
+                        substitutions,
+                        ..
+                    } => {
                         assert_eq!(args, vec!["pwd"]);
                         assert!(substitutions.is_empty());
                     }
@@ -583,7 +641,11 @@ mod tests {
                 match *left {
                     ShellNode::Pipe(pipe_left, pipe_right) => {
                         match *pipe_left {
-                            ShellNode::Command { args, redirects, substitutions } => {
+                            ShellNode::Command {
+                                args,
+                                redirects,
+                                substitutions,
+                            } => {
                                 assert_eq!(args, vec!["cat", "input.txt"]);
                                 assert!(redirects.is_empty());
                                 assert!(substitutions.is_empty());
@@ -591,7 +653,11 @@ mod tests {
                             _ => panic!("Expected Command"),
                         }
                         match *pipe_right {
-                            ShellNode::Command { args, redirects, substitutions } => {
+                            ShellNode::Command {
+                                args,
+                                redirects,
+                                substitutions,
+                            } => {
                                 assert_eq!(args, vec!["grep", "error"]);
                                 assert_eq!(redirects.len(), 1);
                                 assert!(substitutions.is_empty());
@@ -603,7 +669,11 @@ mod tests {
                 }
                 // Right side: echo 'done'
                 match *right {
-                    ShellNode::Command { args, redirects, substitutions } => {
+                    ShellNode::Command {
+                        args,
+                        redirects,
+                        substitutions,
+                    } => {
                         assert_eq!(args, vec!["echo", "done"]);
                         assert!(redirects.is_empty());
                         assert!(substitutions.is_empty());
@@ -619,7 +689,11 @@ mod tests {
     fn test_parse_command_substitution() {
         let ast = parse_shell("echo $(date +%Y)").unwrap();
         match ast {
-            ShellNode::Command { args, redirects, substitutions } => {
+            ShellNode::Command {
+                args,
+                redirects,
+                substitutions,
+            } => {
                 assert_eq!(args.len(), 2);
                 match &args[0] {
                     crate::shell::Arg::Literal(s) => assert_eq!(s, "echo"),
@@ -632,7 +706,9 @@ mod tests {
                 assert!(redirects.is_empty());
                 assert_eq!(substitutions.len(), 1);
                 match &substitutions[0] {
-                    ShellNode::Command { args, redirects, .. } => {
+                    ShellNode::Command {
+                        args, redirects, ..
+                    } => {
                         assert_eq!(args.len(), 2);
                         match &args[0] {
                             crate::shell::Arg::Literal(s) => assert_eq!(s, "date"),
@@ -673,7 +749,11 @@ mod tests {
     fn test_parse_multiple_spaces() {
         let ast = parse_shell("ls    -la    --color").unwrap();
         match ast {
-            ShellNode::Command { args, redirects, substitutions } => {
+            ShellNode::Command {
+                args,
+                redirects,
+                substitutions,
+            } => {
                 assert_eq!(args, vec!["ls", "-la", "--color"]);
                 assert!(redirects.is_empty());
                 assert!(substitutions.is_empty());
