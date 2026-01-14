@@ -1,4 +1,4 @@
-use clap::{Parser, ValueEnum};
+use clap::{ArgAction, Parser, ValueEnum};
 use rmcp::transport::sse_server::{SseServer, SseServerConfig};
 use rmcp::{
     ErrorData as McpError, elicit_safe,
@@ -50,6 +50,13 @@ struct Args {
         help = "Default working directory for executed commands"
     )]
     workdir: Option<PathBuf>,
+    #[arg(
+        short = 'v',
+        long,
+        action = ArgAction::Count,
+        help = "Increase verbosity (-v: log tool calls, -vv: include debug output)"
+    )]
+    verbose: u8,
 }
 
 use rmcp::{
@@ -301,13 +308,20 @@ impl ShellExecutor {
         context: RequestContext<RoleServer>,
         Parameters(ExecuteCommandRequest { command }): Parameters<ExecuteCommandRequest>,
     ) -> Result<CallToolResult, McpError> {
+        tracing::info!(
+            command = %command,
+            cwd = %self.default_cwd.display(),
+            supports_elicitation = context.peer.supports_elicitation(),
+            "mcp.shell request"
+        );
+
         // Parse the command into AST
         let ast = match parse_shell(&command) {
             Some(ast) => ast,
             None => {
-                return Ok(CallToolResult::success(vec![Content::text(
-                    "Failed to parse command".to_string(),
-                )]));
+                let response = "Failed to parse command".to_string();
+                tracing::info!(command = %command, response = %response, "mcp.shell response");
+                return Ok(CallToolResult::success(vec![Content::text(response)]));
             }
         };
 
@@ -329,16 +343,25 @@ impl ShellExecutor {
                         // Proceed with execution despite validation error
                     }
                     Ok(Some(_)) => {
-                        return Ok(CallToolResult::success(vec![Content::text(
-                            "Command execution cancelled by user.".to_string(),
-                        )]));
+                        let response = "Command execution cancelled by user.".to_string();
+                        tracing::info!(
+                            command = %command,
+                            response = %response,
+                            "mcp.shell response"
+                        );
+                        return Ok(CallToolResult::success(vec![Content::text(response)]));
                     }
                     Ok(None) => {
-                        return Ok(CallToolResult::success(vec![Content::text(
-                            "No confirmation provided.".to_string(),
-                        )]));
+                        let response = "No confirmation provided.".to_string();
+                        tracing::info!(
+                            command = %command,
+                            response = %response,
+                            "mcp.shell response"
+                        );
+                        return Ok(CallToolResult::success(vec![Content::text(response)]));
                     }
                     Err(e) => {
+                        tracing::error!(error = %e, "mcp.shell elicitation error");
                         return Err(McpError::internal_error(
                             format!("Elicitation error: {}", e),
                             None,
@@ -385,6 +408,11 @@ impl ShellExecutor {
                     }
                 };
 
+                tracing::info!(
+                    command = %command,
+                    response = %enhanced_error,
+                    "mcp.shell response"
+                );
                 return Ok(CallToolResult::success(vec![Content::text(enhanced_error)]));
             }
         }
@@ -395,12 +423,13 @@ impl ShellExecutor {
         let shell_command = match shell::ast_to_shell_string(&ast) {
             Ok(cmd) => cmd,
             Err(e) => {
-                return Ok(CallToolResult::success(vec![Content::text(format!(
-                    "Failed to convert AST to shell command: {}",
-                    e
-                ))]));
+                let response = format!("Failed to convert AST to shell command: {}", e);
+                tracing::info!(command = %command, response = %response, "mcp.shell response");
+                return Ok(CallToolResult::success(vec![Content::text(response)]));
             }
         };
+
+        tracing::debug!(shell_command = %shell_command, "mcp.shell validated command");
 
         // Execute the full command through shell
         match tokio::time::timeout(
@@ -418,6 +447,15 @@ impl ShellExecutor {
                 };
                 let json = serde_json::to_string(&response)
                     .unwrap_or_else(|_| "Serialization error".to_string());
+                tracing::info!(
+                    command = %command,
+                    exit_code = response.exit_code,
+                    success = response.success,
+                    stdout_len = response.stdout.len(),
+                    stderr_len = response.stderr.len(),
+                    response = %json,
+                    "mcp.shell response"
+                );
                 Ok(CallToolResult::success(vec![Content::text(json)]))
             }
             Ok(Err(e)) => {
@@ -429,6 +467,15 @@ impl ShellExecutor {
                 };
                 let json = serde_json::to_string(&response)
                     .unwrap_or_else(|_| "Serialization error".to_string());
+                tracing::info!(
+                    command = %command,
+                    exit_code = response.exit_code,
+                    success = response.success,
+                    stdout_len = response.stdout.len(),
+                    stderr_len = response.stderr.len(),
+                    response = %json,
+                    "mcp.shell response"
+                );
                 Ok(CallToolResult::success(vec![Content::text(json)]))
             }
             Err(_) => {
@@ -440,6 +487,15 @@ impl ShellExecutor {
                 };
                 let json = serde_json::to_string(&response)
                     .unwrap_or_else(|_| "Serialization error".to_string());
+                tracing::info!(
+                    command = %command,
+                    exit_code = response.exit_code,
+                    success = response.success,
+                    stdout_len = response.stdout.len(),
+                    stderr_len = response.stderr.len(),
+                    response = %json,
+                    "mcp.shell response"
+                );
                 Ok(CallToolResult::success(vec![Content::text(json)]))
             }
         }
@@ -473,12 +529,20 @@ async fn main() -> anyhow::Result<()> {
         .and_then(|s| s.parse().ok())
         .unwrap_or(30);
 
+    let log_filter = if std::env::var_os("RUST_LOG").is_some() {
+        tracing_subscriber::EnvFilter::try_from_default_env()
+            .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn"))
+    } else {
+        match args.verbose {
+            0 => tracing_subscriber::EnvFilter::new("warn"),
+            1 => tracing_subscriber::EnvFilter::new("info"),
+            _ => tracing_subscriber::EnvFilter::new("debug"),
+        }
+    };
+
     tracing_subscriber::registry()
-        .with(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "warn".to_string().into()),
-        )
-        .with(tracing_subscriber::fmt::layer())
+        .with(log_filter)
+        .with(tracing_subscriber::fmt::layer().with_writer(std::io::stderr))
         .init();
 
     // Display startup information

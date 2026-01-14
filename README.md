@@ -93,6 +93,16 @@ SHELL_MCP_STARTUP_INFO=false shell-mcp
 ```
 > If not set, startup information is shown by default.
 
+**Verbose logging (request/response):**
+```bash
+# Log each incoming shell command and the returned result
+shell-mcp -v
+
+# Also enable debug-level logs (includes validated shell command)
+shell-mcp -vv
+```
+> Logs are written to stderr. `RUST_LOG` takes precedence over `-v/-vv`.
+
 ### Error Handling
 
 The server provides detailed, context-aware error messages:
